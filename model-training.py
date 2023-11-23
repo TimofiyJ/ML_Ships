@@ -1,18 +1,15 @@
+# Dependencies
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, UpSampling2D, Concatenate
-from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.model_selection import train_test_split
 from tensorflow.keras.utils import Sequence
-TF_ENABLE_ONEDNN_OPTS=0
 import pandas as pd
 import tensorflow as tf
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 from PIL import Image
-from PIL import ImageFile
 
+# Main functions
 def decode_run_length(encoded_coordinates):
     pixel_numbers = []
     pixel_number = np.array(encoded_coordinates[::2], dtype=int) 
@@ -25,6 +22,7 @@ def decode_run_length(encoded_coordinates):
     pixel_numbers = np.array(pixel_numbers)
     
     return pixel_numbers
+
 
 def create_mask(pixels_list, image_size=(768, 768)):
     # Create a blank image with black background
@@ -46,7 +44,7 @@ def get_image(index,dataframe,pixels_dictionary):
     '''
     # ImageId - column with path to the image in the training directory
     # EncodedPixels - column with run-length encoded pixels of the ship
-    image_path = dataframe.loc[index, 'ImageId']
+    image_path = dataframe.iloc[index]['ImageId']
     pixels_list = pixels_dictionary[image_path].split() 
 
     image = Image.open(train_dir + image_path)
@@ -65,24 +63,27 @@ def get_mask(index,dataframe,pixels_dictionary):
     '''
     # ImageId - column with path to the image in the training directory
     # EncodedPixels - column with run-length encoded pixels of the ship
-    image_path = dataframe.loc[index, 'ImageId']
+    image_path = dataframe.iloc[index]['ImageId']
     pixels_list = pixels_dictionary[image_path].split() 
 
-    if (not pd.isna(dataframe.loc[index, 'EncodedPixels'])):
+    if (not pd.isna(dataframe.iloc[index]['EncodedPixels'])):
         
         pixels_list = [int(x) for x in pixels_list]
 
         mask_array = create_mask(pixels_list, (768, 768))
-                
+
+        mask_array = mask_array.astype(int)
+
         mask_array = np.expand_dims(mask_array, axis=-1)
 
         return mask_array
     else:
         
-        mask_array = create_mask([], (768, 768))
+        mask_array = create_mask([0], (768, 768))
         mask_array = np.expand_dims(mask_array, axis=-1)
 
         return mask_array
+
 
 
 # Define the U-Net architecture
@@ -130,23 +131,76 @@ def dice_coefficient(y_true, y_pred, smooth=1.0):
     union = K.sum(y_true, axis=-1) + K.sum(y_pred, axis=-1)
     return (2.0 * intersection + smooth) / (union + smooth)
 
+# Define data generator
+class CustomDataGenerator(Sequence):
+    def __init__(self, dataframe, pixels_dictionary, batch_size=32, img_size=(768, 768), augment=False):
+        self.dataframe = dataframe
+        self.pixels_dictionary = pixels_dictionary
+        self.batch_size = batch_size
+        self.img_size = img_size
+        self.augment = augment
 
+    def __len__(self):
+        return int(np.ceil(len(self.dataframe) / self.batch_size))
+
+    def __getitem__(self, index):
+        start_idx = index * self.batch_size
+        end_idx = (index + 1) * self.batch_size
+
+        batch_image_indices = range(start_idx, min(end_idx, len(self.dataframe)))
+
+        # Load and preprocess images and masks
+        batch_images = [self.get_image(index) for index in batch_image_indices]
+        batch_masks = [self.get_mask(index) for index in batch_image_indices]
+
+        return np.array(batch_images), np.array(batch_masks)
+
+    def on_epoch_end(self):
+        # Shuffle the dataframe after each epoch
+        self.dataframe = self.dataframe.sample(frac=1).reset_index(drop=True)
+
+    def get_image(self, index):
+        image = get_image(index, self.dataframe, self.pixels_dictionary)  # Replace with your actual get_image function
+        image = image / 255.0  # Normalize to [0, 1]
+
+        # Apply data augmentation if needed
+        if self.augment:
+            # Add your augmentation logic here
+            pass
+
+        return image
+
+    def get_mask(self, index):
+        mask = get_mask(index, self.dataframe, self.pixels_dictionary)  # Replace with your actual get_mask function
+        mask = mask / 255.0  # Normalize to [0, 1]
+
+        # Apply data augmentation if needed
+        if self.augment:
+            # Add your augmentation logic here
+            pass
+
+        return mask
+    
+
+# Initialize paths
 data_path = './airbus-ship-detection/' # directory of the data
 train_csv ='./airbus-ship-detection/train_ship_segmentations_v2.csv'  # Path to the CSV train file 
 test_dir = data_path+'test_v2/' # Directory where the test images are currently located
 train_dir = data_path+'train_v2/' # Directory where the train images are currently located
 
+# Get the data
 df = pd.read_csv(train_csv)     
 
+# Get unique images
 df_unique_images = df.copy()
 df_unique_images['NumShips'] = df_unique_images.groupby('ImageId')['ImageId'].transform('count')
 df_unique_images.loc[df_unique_images['EncodedPixels'].isna(), 'NumShips'] = 0
 df_unique_images = df_unique_images.drop_duplicates(subset=['ImageId'])
 
-
-no_ships_samples = 26112
-one_ship_samples = 27104
-more_than_one_ship_samples = 15452
+# Undersample the data
+no_ships_samples = 100
+one_ship_samples = 1710
+more_than_one_ship_samples = 945
 
 undersampled_no_ships = df_unique_images[df_unique_images['NumShips'] == 0].sample(no_ships_samples)
 undersampled_one_ship = df_unique_images[df_unique_images['NumShips'] == 1].sample(one_ship_samples)
@@ -156,7 +210,8 @@ undersampled_df = pd.concat([undersampled_no_ships, undersampled_one_ship, under
 
 undersampled_df = undersampled_df.sample(frac=1).reset_index(drop=True)
 
-pixels_dict = {}
+# All ships in one image
+pixels_dict = {} # key - path to image value - pixels of all the ships in this image
 
 for _, row in df.iterrows():
     image_id = row['ImageId']
@@ -167,78 +222,28 @@ for _, row in df.iterrows():
     else:
         pixels_dict[image_id] += ' ' + encoded_pixels
 
+# Test - validation split
+X_train, X_val = train_test_split(undersampled_df, 
+    test_size=0.25, random_state= 8) 
 
-class CustomDataGenerator:
-    def __init__(self, dataframe, pixels_dictionary, batch_size, img_size=(768, 768)):
-        self.dataframe = dataframe
-        self.pixels_dictionary = pixels_dictionary
-        self.batch_size = batch_size
-        self.img_size = img_size
+# Hyperparameters
+image_size = (768,768)
+num_epochs = 3
+batch_size = 4
+steps_per_epoch = 5
+validation_steps = 5
 
-        # ImageDataGenerator for augmentation
-        self.data_generator = ImageDataGenerator(
-            rescale=1./255,
-            rotation_range=20,
-            horizontal_flip=True,
-            vertical_flip=True,
-            fill_mode='constant',
-            cval=0
-        )
-
-    def generate_batches(self):
-        while True:
-            batch_indices = np.random.choice(len(self.dataframe), size=self.batch_size, replace=False)
-            batch_image_paths = self.dataframe['ImageId'].iloc[batch_indices].tolist()
-
-            images = []
-            masks = []
-
-            for image_path in batch_image_paths:
-                image_array, mask_array = self.get_data(image_path)
-                images.append(image_array)
-                masks.append(mask_array)
-
-            yield np.array(images), np.array(masks)
-
-    def get_data(self, image_path):
-        index = self.dataframe[self.dataframe['ImageId'] == image_path].index[0]
-
-        # Load and resize image
-        image = Image.open(train_dir + image_path)
-        image_array = np.array(image) / 255.0
-        image_array = image_array.reshape((1,) + image_array.shape)
-
-        # Load and resize mask
-        mask_array = get_mask(index, self.dataframe, self.pixels_dictionary)
-        mask_array = mask_array.reshape((1,) + mask_array.shape + (1,))
-
-        # Perform data augmentation
-        seed = np.random.randint(999999)
-        params = self.data_generator.get_random_transform(image_array.shape[1:], seed=seed)
-        augmented_image_array = self.data_generator.apply_transform(image_array[0], params)
-        augmented_mask_array = self.data_generator.apply_transform(mask_array[0, :, :, 0], params)
-
-        return augmented_image_array, augmented_mask_array
-
-batch_size = 32
-epochs = 20
-img_size = (768, 768)
-
-data_generator = CustomDataGenerator(dataframe=undersampled_df, pixels_dictionary=pixels_dict, batch_size=batch_size, img_size=img_size)
+train_generator = CustomDataGenerator(X_train, pixels_dictionary=pixels_dict, batch_size=batch_size, augment=False)
+val_generator = CustomDataGenerator(X_val, pixels_dictionary=pixels_dict, batch_size=batch_size, augment=False)
 
 
 model = unet_model(input_size=(768, 768, 3))
 
-# # Compile the model with the Dice coefficient metric
-model.compile(optimizer=Adam(learning_rate=1e-4), loss='binary_crossentropy', metrics=[dice_coefficient])
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy', tf.keras.metrics.MeanIoU(num_classes=2), dice_coefficient])
 model.summary()
-num_epochs = 10  # Adjust the number of epochs as needed
-steps_per_epoch = len(undersampled_df)//batch_size
-model.fit(data_generator.generate_batches(), steps_per_epoch=steps_per_epoch, epochs=num_epochs)
-tf.keras.Model.save(model)
 
+# Train the model
+history = model.fit(train_generator,batch_size = batch_size, epochs=num_epochs, steps_per_epoch=steps_per_epoch, validation_data=val_generator, validation_steps=validation_steps)
 
-# # Print a summary of the model architecture
-
-
-
+# Save the model
+model.save('./model-1')
