@@ -18,7 +18,7 @@ test_dir = data_path+'test_v2/' # Directory where the test images are currently 
 
 # Load the model 
 custom_objects = {'dice_coefficient': dice_coefficient}
-loaded_model = tf.keras.models.load_model('./save/model', custom_objects=custom_objects)
+loaded_model = tf.keras.models.load_model('./model-1', custom_objects=custom_objects)
 
 # Test the model
 test_dir_os = os.listdir(test_dir)
