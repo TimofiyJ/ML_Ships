@@ -18,7 +18,7 @@ directory_location = os.listdir(str(sys.argv[1]))
 
 # Load the model
 custom_objects = {'dice_coefficient': dice_coefficient}
-loaded_model = tf.keras.models.load_model('./model-1', custom_objects=custom_objects)
+loaded_model = tf.keras.models.load_model('./save/model', custom_objects=custom_objects)
 
 save_folder_location = './results'
 
